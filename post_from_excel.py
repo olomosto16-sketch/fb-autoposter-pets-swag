@@ -1,37 +1,37 @@
 """
-Facebook Auto-Poster — Cloudflare R2 (Bucket) + Excel Version
+Facebook Auto-Poster — Cloudflare R2 (Folder) + Excel Version
 ===============================================================
-Excel থেকে schedule পড়ে, Cloudflare R2 bucket-এর images/ ও videos/
-ফোল্ডার থেকে ফাইলের নাম দিয়ে ফাইল নামায়, Facebook Page-এ পোস্ট করে।
+Excel থেকে schedule পড়ে, Cloudflare R2 bucket-এর images/videos
+ফোল্ডার (prefix) থেকে ফাইলের নাম দিয়ে খুঁজে ফাইল নামায়, Facebook
+Page-এ পোস্ট করে, এবং পোস্ট সফল হলে R2 থেকে ফাইলটি ডিলিট করে দেয়
+(স্টোরেজ ফ্রি লিমিটের মধ্যে রাখার জন্য)।
 
 কীভাবে ব্যবহার করবে:
-1. Cloudflare R2-তে একটা bucket বানাও (যেমন: fb-lol-cringe)
-2. bucket-এর ভেতরে "images" ও "videos" নামে দুটো ফোল্ডার (prefix) বানাও
-3. ছবি images/ ফোল্ডারে, ভিডিও videos/ ফোল্ডারে আপলোড করো
-4. Excel-এ শুধু ফাইলের নাম লিখো (কোনো prefix ছাড়া), যেমন: swert.jpg
-5. Type কলামে Image/Video ঠিকভাবে দাও — এটা দিয়েই ঠিক করা হবে কোন
-   ফোল্ডারে (images/ বা videos/) খুঁজবে
-6. Schedule Time দাও → GitHub-এ upload করো
+1. Cloudflare R2 bucket-এর ভেতরে "images" ও "videos" নামে দুটো
+   ফোল্ডার (prefix) বানাও
+2. ছবি images ফোল্ডারে, ভিডিও videos ফোল্ডারে ড্র্যাগ-ড্রপ করে
+   আপলোড করো
+3. Excel-এ শুধু ফাইলের নাম লিখো (কোনো prefix ছাড়া), যেমন: swert.jpg
+4. Type কলামে Image/Video ঠিকভাবে দাও — এটা দিয়েই ঠিক করা হবে কোন
+   ফোল্ডারে (images/ না videos/) খুঁজবে
+5. Schedule Time দাও → GitHub-এ upload করো
 
 প্রয়োজনীয় GitHub Secrets:
   FACEBOOK_PAGE_ID
   FACEBOOK_ACCESS_TOKEN
-  R2_ACCESS_KEY_ID       ← Cloudflare R2 API token থেকে
-  R2_SECRET_ACCESS_KEY   ← Cloudflare R2 API token থেকে
-  R2_ENDPOINT_URL        ← https://<account_id>.r2.cloudflarestorage.com
-  R2_BUCKET_NAME         ← যেমন: fb-lol-cringe
-
-⚠️  bucket-টা public হতে হবে না — boto3 নিজের access key/secret দিয়ে
-    সরাসরি R2-র সাথে কথা বলে, তাই Google Drive-এর মতো "Anyone with
-    the link" শেয়ার করার দরকার নেই।
+  R2_ACCESS_KEY_ID
+  R2_SECRET_ACCESS_KEY
+  R2_ENDPOINT_URL          ← যেমন: https://<account-id>.r2.cloudflarestorage.com
+  R2_BUCKET_NAME           ← যেমন: fb-lol-cringe
 """
 
 import os
 import sys
 import requests
 import openpyxl
-import boto3
 import tempfile
+import boto3
+from botocore.exceptions import ClientError
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -44,8 +44,8 @@ R2_SECRET_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 R2_ENDPOINT   = os.environ.get("R2_ENDPOINT_URL", "")
 R2_BUCKET     = os.environ.get("R2_BUCKET_NAME", "")
 
-EXCEL_FILE  = Path("facebook_content_calendar.xlsx")
-SHEET_NAME  = "Content Calendar"
+EXCEL_FILE    = Path("facebook_content_calendar.xlsx")
+SHEET_NAME    = "Content Calendar"
 
 COL_ID       = 1
 COL_FILENAME = 2
@@ -59,6 +59,7 @@ COL_NOTE     = 8
 BASE_URL = f"https://graph.facebook.com/v19.0/{PAGE_ID}"
 IST      = timezone(timedelta(hours=5, minutes=30))
 
+# ── Cloudflare R2 client (S3-compatible) ──────────────
 s3 = boto3.client(
     "s3",
     endpoint_url=R2_ENDPOINT,
@@ -66,16 +67,19 @@ s3 = boto3.client(
     aws_secret_access_key=R2_SECRET_KEY,
 )
 
-# ── Cloudflare R2 helpers ──────────────────────────────
+# ── R2 helpers ─────────────────────────────────────────
 
 def download_from_r2(post_type, filename, dest_path):
-    """R2 bucket-এর images/ বা videos/ ফোল্ডার থেকে ফাইল নামায়।"""
+    """
+    R2 bucket-এর images/ বা videos/ ফোল্ডার (prefix) থেকে ফাইল নামায়।
+    """
     prefix = "images" if post_type == "image" else "videos"
     key = f"{prefix}/{filename}"
+
     try:
         s3.download_file(R2_BUCKET, key, dest_path)
-    except Exception as e:
-        print(f"  ❌ '{key}' ডাউনলোড ব্যর্থ: {e}")
+    except ClientError as e:
+        print(f"  ❌ '{key}' R2-তে পাওয়া যায়নি বা download ব্যর্থ: {e}")
         return False
 
     size = Path(dest_path).stat().st_size
@@ -85,6 +89,21 @@ def download_from_r2(post_type, filename, dest_path):
 
     print(f"  ✓ R2 থেকে download হয়েছে ({size//1024} KB)")
     return True
+
+
+def delete_from_r2(post_type, filename):
+    """
+    পোস্ট সফল হওয়ার পর R2 থেকে ফাইলটি মুছে ফেলে, যাতে ফ্রি স্টোরেজ
+    লিমিটের মধ্যে থাকা যায়।
+    """
+    prefix = "images" if post_type == "image" else "videos"
+    key = f"{prefix}/{filename}"
+    try:
+        s3.delete_object(Bucket=R2_BUCKET, Key=key)
+        print(f"  🗑️  R2 থেকে '{key}' ডিলিট করা হয়েছে")
+    except ClientError as e:
+        # ডিলিট ব্যর্থ হলেও পোস্ট সফল হয়েছে, তাই শুধু warning দেখাবে
+        print(f"  ⚠️  R2 থেকে ডিলিট করা যায়নি: {e}")
 
 # ── Load Excel ────────────────────────────────────────
 
@@ -225,10 +244,6 @@ def main():
                 print(f"  ⚠️  ফাইলের নাম খালি, স্কিপ করা হলো")
                 continue
 
-            if not R2_BUCKET:
-                print(f"  ❌ R2_BUCKET_NAME সেট করা নেই")
-                continue
-
             suffix = Path(filename).suffix or (".jpg" if post_type == "image" else ".mp4")
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp_path = tmp.name
@@ -244,6 +259,10 @@ def main():
                 post_id = post_video(tmp_path, caption)
 
             Path(tmp_path).unlink(missing_ok=True)
+
+            # পোস্ট সফল হলে R2 থেকে ফাইল ডিলিট করে দাও (স্টোরেজ ফ্রি রাখতে)
+            if post_id:
+                delete_from_r2(post_type, filename)
 
         else:
             print(f"  ⚠️  অচেনা ধরন: '{post_type}'")
