@@ -1,0 +1,46 @@
+name: Facebook Auto-Post (Excel)
+
+on:
+  schedule:
+    # প্রতি ১৫ মিনিটে চেক করবে — due পোস্ট থাকলে পোস্ট করবে, না থাকলে বন্ধ
+    - cron: "*/15 * * * *"
+
+  # হাতে চালাতে চাইলে
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests openpyxl boto3
+
+      - name: Run auto-poster
+        env:
+          FACEBOOK_PAGE_ID:        ${{ secrets.FACEBOOK_PAGE_ID }}
+          FACEBOOK_ACCESS_TOKEN:   ${{ secrets.FACEBOOK_ACCESS_TOKEN }}
+          R2_ACCESS_KEY_ID:        ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY:    ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL:         ${{ secrets.R2_ENDPOINT_URL }}
+          R2_BUCKET_NAME:          ${{ secrets.R2_BUCKET_NAME }}
+        run: python post_from_excel.py
+
+      # Excel আপডেট (Status: Done, Post ID) GitHub-এ push করো
+      - name: Push updated Excel
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add facebook_content_calendar.xlsx
+          git diff --staged --quiet || git commit -m "Auto-update: $(date +'%Y-%m-%d %H:%M') UTC"
+          git push
